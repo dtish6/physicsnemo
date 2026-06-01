@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hydra configuration for the 3D linear elasticity surrogate.
+# Override any field from the command line, e.g.:
+#   python train.py training.batch_size=4 dataset.grid_size=64
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+dataset:
+  # Directories containing *.h5 sample files.
+  train_path: ./data/train
+  val_path:   ./data/val
+
+  # Path to normalization_stats.npz produced by:
+  #   python -c "from data.dataset import ElasticityDataset; \
+  #              ElasticityDataset.compute_statistics('./data/train', './data/normalization_stats.npz')"
+  stats_path: ./data/normalization_stats.npz
+
+  # Voxel grid size (isotropic). All *.h5 files must have this spatial size.
+  # Scaling: change to 256 and increase model.model_depth to 5.
+  grid_size: 128
+
+  # DataLoader workers (set to 0 for debugging; 4 recommended for disk I/O).
+  num_workers: 4
+
+  # Pin host memory for faster GPU transfer (disabled on CPU-only machines).
+  pin_memory: true
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+model:
+  # Input channels: solid_mask(1), E_normalized(1), body_force(3), wind_pressure(1)
+  in_channels: 6
+  # Output channels: displacement (ux, uy, uz)
+  out_channels: 3
+
+  # U-Net encoder depth.
+  # depth=4: bottleneck spatial size = 128/8 = 16^3 (default, ~8M params)
+  # depth=5: use with 256^3 input (~30M params)
+  model_depth: 4
+
+  # Per-block channel widths (length = model_depth * 2).
+  feature_map_channels: [32, 32, 64, 64, 128, 128, 256, 256]
+
+  # Normalization inside Conv3DBlocks.
+  # Options: "groupnorm" | "batchnorm" | "layernorm" | null
+  normalization: groupnorm
+
+  # Activation recomputation to halve peak GPU memory.  Adds ~30% compute.
+  gradient_checkpointing: true
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  epochs: 100
+  batch_size: 2          # increase to 4 if GPU RAM > 16 GB
+
+  # Adam optimizer
+  lr: 1.0e-4
+  lr_min: 1.0e-6         # CosineAnnealingLR eta_min
+  weight_decay: 1.0e-5
+
+  # Gradient clipping (max norm).  Set to 0.0 to disable.
+  grad_clip: 1.0
+
+  # Mixed precision (AMP).  Requires CUDA; automatically disabled on CPU.
+  amp: true
+
+  # Loss weights.  Set eq_residual > 0 only after ~20 warm-up epochs.
+  loss_weights:
+    mse: 1.0
+    masked_mse: 1.0
+    eq_residual: 0.0    # physics-informed term; enable after warm-up
+
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
+checkpoint:
+  ckpt_path: ./checkpoints
+  save_every_n_epochs: 5
+
+# ---------------------------------------------------------------------------
+# Logging (TensorBoard)
+# ---------------------------------------------------------------------------
+logging:
+  log_dir: ./tensorboard_logs
+  log_every_n_steps: 10   # step-level loss logging

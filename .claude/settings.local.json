@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep *)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe smoke_test.py)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe -m pytest solvers/tests/test_voxel_fem.py -v)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe solvers/tests/test_voxel_fem.py)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe solvers/benchmark.py --precond jacobi)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe solvers/benchmark.py --precond amg)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe solvers/compare_preconditioners.py)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe -)",
+      "Bash(C:/Users/dtish/miniconda3/envs/multiopt/python.exe -m pytest solvers/tests/test_voxel_fem.py -q)"
+    ]
+  }
+}
