@@ -83,7 +83,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 1. Instantiate model
     # ------------------------------------------------------------------
-    from models.elasticity_unet import ElasticityUNet
+    from step3_training._3_3_elasticity_unet import ElasticityUNet
 
     model = ElasticityUNet(
         in_channels=6,
@@ -125,7 +125,7 @@ def main() -> None:
         # ------------------------------------------------------------------
         # 4. Loss computation
         # ------------------------------------------------------------------
-        from training.losses import combined_loss
+        from step3_training._3_4_losses import combined_loss
 
         loss_total, loss_dict = combined_loss(
             pred=pred,

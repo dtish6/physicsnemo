@@ -28,6 +28,15 @@ import torch
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
+# Force UTF-8 console output. On Windows the default cp1252 codec cannot encode
+# the non-ASCII characters used in log messages (e.g. "→", "—"), which makes the
+# logging StreamHandler raise UnicodeEncodeError and spam tracebacks.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
+
 # Make project subpackages importable when running from the project root.
 # (No install required — just `cd examples/elasticity_3d && python train.py`.)
 
@@ -52,7 +61,7 @@ def main(cfg: DictConfig) -> None:
         log.info("GPU: %s", torch.cuda.get_device_name(device))
 
     # Import here so sys.path manipulations (if any) take effect first.
-    from training.trainer import Trainer
+    from step3_training._3_5_trainer import Trainer
 
     trainer = Trainer(cfg, device)
     start_epoch = trainer.load_checkpoint()

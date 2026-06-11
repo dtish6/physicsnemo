@@ -1,0 +1,23 @@
+# Datasets / generated artifacts (regenerable, too large for git)
+data/
+data_wood/
+checkpoints/
+outputs/
+tensorboard_logs/
+
+# Generated result/geometry artifacts
+*.h5
+*.stl
+*.npz
+*.mdlus
+*.pt
+
+# Large data exports (plan field CSVs, Rhino exports, voxel fields)
+plan*.csv
+*_voxel_field.csv
+cube_voxel_field.csv
+data_wood_gen.log
+
+# Python caches
+__pycache__/
+*.pyc

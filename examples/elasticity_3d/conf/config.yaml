@@ -17,17 +17,20 @@ hydra:
 # ---------------------------------------------------------------------------
 dataset:
   # Directories containing *.h5 sample files.
+  # Produced by step1_preprocess/generate_from_csv.py: each plan is rasterised
+  # 1:1 into a fixed 128(W) x 128(H) x 48(D) grid (10 cm voxels), anchored at
+  # the origin (base on the clamped z=0 plane) and cropped to fit. The vertical
+  # extent is trimmed to 48 (apartments are ~36 tall) to cut dead-air compute.
+  # No downsampling, no padding.
   train_path: ./data/train
   val_path:   ./data/val
 
-  # Path to normalization_stats.npz produced by:
-  #   python -c "from data.dataset import ElasticityDataset; \
-  #              ElasticityDataset.compute_statistics('./data/train', './data/normalization_stats.npz')"
+  # Path to normalization_stats.npz (computed over the train set).
   stats_path: ./data/normalization_stats.npz
 
-  # Voxel grid size (isotropic). All *.h5 files must have this spatial size.
-  # Scaling: change to 256 and increase model.model_depth to 5.
-  grid_size: 128
+  # Spatial grid size (D, H, W) = (z, y, x). Each dim divisible by 2**model_depth
+  # (16): 48/16=3, 128/16=8. Single int -> cube; [D,H,W] list -> non-cubic.
+  grid_size: [48, 128, 128]
 
   # DataLoader workers (set to 0 for debugging; 4 recommended for disk I/O).
   num_workers: 4
