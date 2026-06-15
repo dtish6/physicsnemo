@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Smoke-test configuration: small 32^3 grid, tiny U-Net, the ./data_smoke
+# dataset (100 floorplans @ 0.4 m voxels, 3x gravity safety factor).
+# Composes the production conf/config.yaml and overrides only what differs.
+#
+# Run:
+#   python train.py --config-name smoke
+#
+# Generate the matching dataset first (same grid/voxel/load_factor):
+#   python step1_preprocess/generate_from_csv.py --out_dir ./data_smoke \
+#       --grid_size 32 --grid_z 32 --voxel_size 0.4 --load_factor 3 --precond direct
+
+defaults:
+  - config
+  - _self_
+
+dataset:
+  train_path: ./data_smoke/train
+  val_path:   ./data_smoke/val
+  stats_path: ./data_smoke/normalization_stats.npz
+  # [D,H,W] (matches the generated data). D=16 (vertical) trims dead air —
+  # plans are only ~3.5 m tall, so 16 @ 0.4 m = 6.4 m is ample; H=W=32 keeps the
+  # 12.8 m horizontal box. Each dim divisible by 2**model_depth (8).
+  grid_size: [16, 32, 32]
+  num_workers: 0       # 0 = simplest/most robust for a quick smoke run
+  pin_memory: false    # CPU-safe (no CUDA dependency)
+
+model:
+  # Tiny net so it fits in <1 GB and trains fast.
+  model_depth: 3                              # 32 / 2**3 = 4^3 bottleneck
+  feature_map_channels: [16, 16, 32, 32, 64, 64]   # length = model_depth * 2
+
+training:
+  epochs: 25            # just enough to confirm loss decreases end-to-end
+  batch_size: 2
+
+checkpoint:
+  ckpt_path: ./checkpoints_smoke
+
+logging:
+  log_dir: ./tensorboard_logs_smoke

@@ -99,11 +99,14 @@ def list_field_csvs(csv_dir: str) -> list[str]:
 
 
 def build_sample(rho: np.ndarray, voxel_size: float, fem_kwargs: dict,
-                 material: dict | None = None) -> dict:
+                 material: dict | None = None, load_factor: float = 1.0) -> dict:
     """Assemble all five HDF5 fields for one plan, solving FEM for displacement.
 
     ``material`` overrides the default steel properties with keys
     ``E0`` (Pa), ``rho_mat`` (kg/m^3), ``nu`` (Poisson). Defaults to steel.
+    ``load_factor`` multiplies the gravity body force (a design safety factor):
+    the stored ``body_force`` input channel AND the FEA displacement target are
+    both scaled by it, so the sample stays physically self-consistent.
     """
     mat = material or {}
     E0      = float(mat.get("E0", E0_PA))
@@ -116,9 +119,9 @@ def build_sample(rho: np.ndarray, voxel_size: float, fem_kwargs: dict,
     # Young's modulus field (physical Pa); homogeneous material, zero in void.
     E_field = (E0 * solid).astype(np.float32)
 
-    # Body force: gravity in -z, scaled by local density. (fx, fy, fz)
+    # Body force: gravity in -z, scaled by local density and the safety factor.
     body_force = np.zeros((3, Nz, Ny, Nx), dtype=np.float32)
-    body_force[2] = (-rho_mat * GRAVITY * rho).astype(np.float32)
+    body_force[2] = (-load_factor * rho_mat * GRAVITY * rho).astype(np.float32)
 
     # Default load case: no wind.
     wind_pressure = np.zeros((Nz, Ny, Nx), dtype=np.float32)
@@ -171,11 +174,11 @@ def _process_plan(task: tuple) -> dict:
     Module-level + picklable args so it works with multiprocessing on Windows
     (spawn). ``grid_dhw`` is (Nz, Ny, Nx) = (D, H, W).
     """
-    plan_path, out_path, voxel_size, grid_dhw, fem_kwargs, material = task
+    plan_path, out_path, voxel_size, grid_dhw, fem_kwargs, material, load_factor = task
     t0 = time.perf_counter()
     df = pd.read_csv(plan_path, usecols=["x", "y", "z", "value"])
     rho = rasterize(df, voxel_size, grid_size=grid_dhw)
-    data = build_sample(rho, voxel_size, fem_kwargs, material)
+    data = build_sample(rho, voxel_size, fem_kwargs, material, load_factor)
     info = data["_info"]
     # Only write CONVERGED samples. A non-converged solve means the cropped
     # geometry has solid disconnected from the clamped base (singular system):
@@ -222,6 +225,10 @@ def main() -> None:
     ap.add_argument("--voxel_size", type=float, default=0.1,
                     help="Physical voxel edge length in metres (CSV coords are metres; "
                          "spacing is 0.1 m = 10 cm). Fixed, not auto-detected.")
+    ap.add_argument("--load_factor", type=float, default=1.0,
+                    help="Design safety factor on the gravity body force (fz). 3.0 = solve "
+                         "under 3x self-weight; scales both the fz input channel and the "
+                         "displacement target (linear, so they stay consistent).")
     ap.add_argument("--fem_tol", type=float, default=1e-6, help="CG tolerance.")
     ap.add_argument("--fem_maxiter", type=int, default=2000, help="CG max iterations.")
     ap.add_argument("--precond", default="amg", choices=["jacobi", "amg", "none", "direct"],
@@ -280,7 +287,8 @@ def main() -> None:
         if (not args.overwrite) and out.exists():
             n_skip += 1   # resume: skip already-generated samples
             continue
-        tasks.append((fp, str(out), args.voxel_size, grid_dhw, fem_kwargs, material))
+        tasks.append((fp, str(out), args.voxel_size, grid_dhw, fem_kwargs, material,
+                      args.load_factor))
 
     box = tuple(n * args.voxel_size for n in grid_dhw)
     print(f"Found {len(files)} plans. grid(D,H,W)={grid_dhw} @ {args.voxel_size} m "
@@ -303,8 +311,8 @@ def main() -> None:
         f"  Young's modulus E : {material['E0']:.3e} Pa   (void uses Emin=1e-9*E, SIMP p=3)\n"
         f"  Poisson ratio nu  : {material['nu']}\n"
         f"  Material density  : {material['rho_mat']} kg/m^3\n"
-        f"  Gravity           : {GRAVITY} m/s^2  ->  body force fz = -rho*g = "
-        f"{-material['rho_mat']*GRAVITY:.1f} N/m^3\n"
+        f"  Gravity           : {GRAVITY} m/s^2  x load_factor {args.load_factor}  ->  body force fz "
+        f"= -{args.load_factor}*rho*g = {-args.load_factor*material['rho_mat']*GRAVITY:.1f} N/m^3\n"
         f"  Boundary condition: z=0 plane fully clamped (Dirichlet u=0); free everywhere else\n"
         f"  Solver            : active-DOF reduction + direct sparse factorize (pardiso/superlu)\n"
         "=====================================\n", flush=True)
