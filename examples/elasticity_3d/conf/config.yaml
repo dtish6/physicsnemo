@@ -22,11 +22,11 @@ dataset:
   # the origin (base on the clamped z=0 plane) and cropped to fit. The vertical
   # extent is trimmed to 48 (apartments are ~36 tall) to cut dead-air compute.
   # No downsampling, no padding.
-  train_path: ./data/train
-  val_path:   ./data/val
+  train_path: D:/Nemo/physicsnemo/examples/elasticity_3d/step1_preprocess/hdf5_data/061611/train
+  val_path:   D:/Nemo/physicsnemo/examples/elasticity_3d/step1_preprocess/hdf5_data/061611/val
 
   # Path to normalization_stats.npz (computed over the train set).
-  stats_path: ./data/normalization_stats.npz
+  stats_path: D:/Nemo/physicsnemo/examples/elasticity_3d/step1_preprocess/hdf5_data/061611/normalization_stats.npz
 
   # Spatial grid size (D, H, W) = (z, y, x). Each dim divisible by 2**model_depth
   # (16): 48/16=3, 128/16=8. Single int -> cube; [D,H,W] list -> non-cubic.
@@ -90,7 +90,7 @@ training:
 # Checkpoint
 # ---------------------------------------------------------------------------
 checkpoint:
-  ckpt_path: ./checkpoints
+  ckpt_path: ./checkpoints/run_061611_wood
   save_every_n_epochs: 5
 
 # ---------------------------------------------------------------------------

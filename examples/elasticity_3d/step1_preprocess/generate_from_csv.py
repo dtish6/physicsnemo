@@ -3,41 +3,41 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert architectural-wall density CSVs into training-ready HDF5 samples.
+"""Convert architectural-wall CSVs into training-ready HDF5 samples.
 
 Input
 -----
 One CSV per wall (``plan_*.csv``) with columns ``x, y, z, value`` where:
   * ``x, y, z``  are physical coordinates (metres) on a regular grid.
-  * ``value``    is a voxel density rho in [0, 1] (1 = fully solid, 0 = void).
+  * ``value``    is a category label; only ``value == 1.0`` is solid wall,
+                 every other value is void (see step1_preprocess._1_1_binarize).
 
 The companion ``*_geom.csv`` files (2D wall outlines) are ignored.
 
 What this script does (per wall)
 --------------------------------
-1.  Rasterise the (x, y, z, value) point cloud onto a dense (Nz, Ny, Nx)
-    density grid, snapping physical coords to indices via the voxel size.
+1.  Rasterise the (x, y, z, value) point cloud onto a FIXED (Nz, Ny, Nx) binary
+    grid, anchored at the plan's min corner and CROPPED to fit (no scaling).
     Axis convention (matches DESIGN.md NCDHW): D=z (vertical), H=y, W=x.
-2.  Optionally block-average downsample by an integer factor (``--downsample``)
-    to keep CPU FEM + training tractable.
-3.  Anchor the wall base (lowest z) at the D=0 plane (the clamped plane) and
-    zero-pad each spatial dim up to a multiple of ``--pad-multiple`` (= 2**model_depth)
-    so the U-Net can pool cleanly.
-4.  Build the load case (DEFAULTS): homogeneous material E0, gravity body force
-    fz = -rho_mat * g * rho, no wind.
-5.  Solve 3D linear elasticity with the built-in VoxelFEMSolver (clamped base)
-    to obtain the displacement field -> the supervised TARGET.
-6.  Write ``sample_{i:05d}.h5`` with the five fields ElasticityDataset expects.
+2.  Build the load case (DEFAULTS): homogeneous material E0, gravity body force
+    fz = -load_factor * rho_mat * g * rho, no wind.
+3.  Solve 3D linear elasticity with the built-in VoxelFEMSolver (clamped base)
+    to obtain the displacement + stress fields -> the supervised TARGET.
+4.  Write ``sample_{i:05d}.h5`` with the six fields ElasticityDataset expects.
+
+Configuration
+-------------
+Edit the USER CONFIG block below (input/output folders, material, grid size),
+then run with no arguments. Any command-line flag overrides the config value.
 
 Usage
 -----
-    # Quick test: 2 walls, aggressive downsample
-    python data/generate_from_csv.py --csv_dir "D:/.../0-1" \
-        --out_dir ./data --n_samples 2 --downsample 4
+    # Use the USER CONFIG defaults
+    python step1_preprocess/generate_from_csv.py
 
-    # Full run (all walls), 80/20 train/val split
-    python data/generate_from_csv.py --csv_dir "D:/.../0-1" \
-        --out_dir ./data --downsample 2
+    # Override on the command line (e.g. 2 walls, wood, custom folders)
+    python step1_preprocess/generate_from_csv.py --csv_dir "D:/.../0-1" \
+        --out_dir ./data_wood --material wood --n_samples 2
 
 Outputs ``<out_dir>/train/*.h5`` and ``<out_dir>/val/*.h5``.
 """
@@ -50,6 +50,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -63,25 +64,44 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from step2_fea._2_2_voxel_fem import VoxelFEMSolver  # noqa: E402
 
-# Preprocessing sub-step: binarize CSV -> fixed 128^3 voxel grid (with crop).
-# (Fixed-cube 1:1 flow: downsample/pad steps are not used here.)
+# Preprocessing sub-step: binarize CSV -> fixed (Nz, Ny, Nx) voxel grid (1:1,
+# crop to fit; no downsample/pad). Grid size comes from USER CONFIG below.
 from step1_preprocess._1_1_binarize import rasterize  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Default material + load case (architectural wall, gravity only)
+# Physics constants + material presets (architectural wall, gravity only)
 # ---------------------------------------------------------------------------
-E0_PA      = 2.1e11    # Young's modulus, Pa (steel default)
-NU         = 0.3       # Poisson's ratio
-RHO_MAT    = 7800.0    # material density, kg/m^3 (steel)
-GRAVITY    = 9.81      # m/s^2
+GRAVITY    = 9.81          # m/s^2
 DENSITY_THRESHOLD = 0.05   # rho above this counts as "solid" for the mask/E field
 
-# Material presets (isotropic). Wood is orthotropic in reality; these are an
-# isotropic structural-softwood approximation (along-grain stiffness).
+# Material presets (isotropic), the single source of truth for E0/rho_mat/nu.
+# Wood is orthotropic in reality; this is an isotropic structural-softwood
+# approximation (along-grain stiffness). "steel" is also the fallback default.
 MATERIALS = {
     "steel": dict(E0=2.1e11, rho_mat=7800.0, nu=0.30),
     "wood":  dict(E0=1.1e10, rho_mat=500.0,  nu=0.35),  # structural softwood
 }
+
+
+# ===========================================================================
+# USER CONFIG  --  edit these 5 lines, then just run:
+#     python step1_preprocess/generate_from_csv.py
+# Any command-line flag still OVERRIDES the matching value here.
+# ===========================================================================
+INPUT_FOLDER  = r"D:\Summer2026_ResPlan\ResPlan\fields_csv\3D_field\within_12p8m_1000"  # plan_*.csv live here
+OUTPUT_FOLDER = r"D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\061611"        # writes OUTPUT_FOLDER/train/*.h5 and /val/*.h5
+MATERIAL      = "wood"          # which preset above: "steel" or "wood"
+LOAD_FACTOR   = 3.0              # safety factor on gravity fz (e.g. 3.0 = solve under 3x self-weight)
+GRID_XY       = 128              # horizontal grid H=W (e.g. 128 or 32). Plans cropped to fit.
+GRID_Z        = 48               # vertical grid D (height)
+PRECOND       = "direct"         # FEA solver: "direct" = exact + fastest (PARDISO); "amg"/"jacobi" = iterative
+JOBS          = 2                # plans solved in parallel (separate processes)
+THREADS_PER_JOB = 4              # CPU threads each solve may use internally
+# SAFE grid numbers (divisible by 16, so the training step is happy): 16, 32, 48, 64, 96, 128
+# JOBS x THREADS_PER_JOB ~= physical cores. Raise JOBS first until RAM is full
+# (each 128^3 direct solve ~13 GB), then give the rest to THREADS_PER_JOB.
+# On a 32 GB machine, keep JOBS <= 2 for PRECOND="direct" at 128^3 or PARDISO OOMs.
+# ===========================================================================
 
 
 def _plan_index(path: str) -> int:
@@ -100,7 +120,7 @@ def list_field_csvs(csv_dir: str) -> list[str]:
 
 def build_sample(rho: np.ndarray, voxel_size: float, fem_kwargs: dict,
                  material: dict | None = None, load_factor: float = 1.0) -> dict:
-    """Assemble all five HDF5 fields for one plan, solving FEM for displacement.
+    """Assemble all six HDF5 fields for one plan, solving FEM for displacement.
 
     ``material`` overrides the default steel properties with keys
     ``E0`` (Pa), ``rho_mat`` (kg/m^3), ``nu`` (Poisson). Defaults to steel.
@@ -108,10 +128,11 @@ def build_sample(rho: np.ndarray, voxel_size: float, fem_kwargs: dict,
     the stored ``body_force`` input channel AND the FEA displacement target are
     both scaled by it, so the sample stays physically self-consistent.
     """
-    mat = material or {}
-    E0      = float(mat.get("E0", E0_PA))
-    rho_mat = float(mat.get("rho_mat", RHO_MAT))
-    nu      = float(mat.get("nu", NU))
+    # Fill any missing key from the steel preset (single source of truth).
+    mat = {**MATERIALS["steel"], **(material or {})}
+    E0      = float(mat["E0"])
+    rho_mat = float(mat["rho_mat"])
+    nu      = float(mat["nu"])
 
     Nz, Ny, Nx = rho.shape
     solid = (rho > DENSITY_THRESHOLD).astype(np.float32)
@@ -145,7 +166,7 @@ def build_sample(rho: np.ndarray, voxel_size: float, fem_kwargs: dict,
     stress = stress.astype(np.float32)
 
     return {
-        "solid_mask":    rho,            # continuous density (informative input)
+        "solid_mask":    rho,            # binary mask 0/1 (informative input)
         "E_normalized":  E_field,        # raw Pa; ChannelNormalize z-scores it
         "body_force":    body_force,
         "wind_pressure": wind_pressure,
@@ -162,7 +183,7 @@ def write_h5(path: Path, data: dict, voxel_size: float) -> None:
                     "wind_pressure", "displacement", "stress"):
             f.create_dataset(key, data=data[key], dtype="float32",
                              compression="gzip")
-        f.attrs["nu"]         = float(data.get("_nu", NU))
+        f.attrs["nu"]         = float(data.get("_nu", MATERIALS["steel"]["nu"]))
         f.attrs["bc"]         = "z=0 plane fully clamped (Dirichlet u=0)"
         f.attrs["grid_shape"] = np.array(data["solid_mask"].shape, dtype=np.int32)
         f.attrs["voxel_size"] = voxel_size
@@ -205,49 +226,177 @@ def _process_plan(task: tuple) -> dict:
     }
 
 
+def format_fea_setup(args, material: dict, grid_dhw: tuple, box: tuple,
+                     backends: set | None = None) -> str:
+    """Render the FEA setup card from the values ACTUALLY used this run.
+
+    Shared by the console print and the run_description.txt file so the two can
+    never drift. ``backends`` (e.g. {"pardiso"}) is only known after the run, so
+    it is omitted (None) for the pre-run console print and filled in for the file.
+    """
+    nz, ny, nx = grid_dhw
+    n_nodes = (nz + 1) * (ny + 1) * (nx + 1)
+    fz_coef = -args.load_factor * material["rho_mat"] * GRAVITY
+    if args.precond == "direct":
+        solver = "active-DOF reduction + direct sparse factorize (pardiso/superlu)"
+    else:
+        solver = (f"active-DOF reduction + CG (precond={args.precond}, "
+                  f"tol={args.fem_tol}, maxiter={args.fem_maxiter})")
+    backend_line = (f"  Backend (actual)  : {', '.join(sorted(backends))}\n"
+                    if backends else "")
+    return (
+        f"  Element type      : Q1/H8 trilinear hex, 2x2x2 Gauss, 3 DOF/node\n"
+        f"  Voxel grid (DxHxW): {nz} x {ny} x {nx}  ({nz*ny*nx} elements max)\n"
+        f"  Voxel size        : {args.voxel_size} m  (box {box[0]:.1f} x {box[1]:.1f} x {box[2]:.1f} m, Z-up)\n"
+        f"  Nodes / total DOF : {n_nodes} / {3*n_nodes}\n"
+        f"  Material          : {args.material}\n"
+        f"  Young's modulus E : {material['E0']:.3e} Pa   (void uses Emin=1e-9*E, SIMP p=3)\n"
+        f"  Poisson ratio nu  : {material['nu']}\n"
+        f"  Material density  : {material['rho_mat']} kg/m^3\n"
+        f"  Gravity           : {GRAVITY} m/s^2  x load_factor {args.load_factor}\n"
+        f"  Body force fz     : {fz_coef:.1f} * rho  N/m^3  (gravity in -z, no wind)\n"
+        f"  Density threshold : {DENSITY_THRESHOLD}  (rho above this counts as solid)\n"
+        f"  Boundary condition: z=0 plane fully clamped (Dirichlet u=0); free elsewhere\n"
+        f"  Solver            : {solver}\n"
+        f"{backend_line}"
+    )
+
+
+def write_run_description(path: Path, args, material: dict, grid_dhw: tuple,
+                          box: tuple, *, n_found: int, n_train: int, n_val: int,
+                          n_tasks: int, n_skip: int, n_written: int,
+                          n_dropped: int, elapsed: float, results: list) -> None:
+    """Write a human-readable summary of this generation run to ``path``.
+
+    Lists the FEA setup actually used (resolved material incl. overrides, real
+    solver backend) plus run accounting (plans found/run/written, timing).
+    """
+    backends = {r["backend"] for r in results} if results else set()
+    umaxes = [r["umax"] for r in results if r["written"]]
+    iters = [r["iters"] for r in results if r["written"]]
+
+    lines = [
+        "FEA dataset generation -- run description",
+        "=" * 55,
+        f"Generated         : {datetime.now().isoformat(timespec='seconds')}",
+        f"Script            : {Path(__file__).name}",
+        "",
+        "--- Paths ---",
+        f"Input  (csv_dir)  : {args.csv_dir}",
+        f"Output (out_dir)  : {args.out_dir}",
+        "",
+        "--- FEA setup (values actually used) ---",
+        format_fea_setup(args, material, grid_dhw, box, backends=backends).rstrip("\n"),
+        "",
+        "--- Run results ---",
+        f"Plans found       : {n_found}",
+        f"Train / Val split : {n_train} / {n_val}  (val_frac={args.val_frac}, seed={args.seed})",
+        f"Skipped (existing): {n_skip}",
+        f"Plans attempted   : {n_tasks}",
+        f"Samples written   : {n_written}",
+        f"Dropped (non-conv): {n_dropped}",
+    ]
+    if umaxes:
+        lines.append(f"|u|max (written)  : min={min(umaxes):.2e}  "
+                     f"max={max(umaxes):.2e}  mean={sum(umaxes)/len(umaxes):.2e} m")
+    if iters and max(iters) > 0:
+        lines.append(f"CG iters (written): min={min(iters)}  max={max(iters)}")
+    lines += [
+        f"Total time        : {elapsed/60:.2f} min ({elapsed:.1f} s)",
+        f"Avg per attempted : {elapsed/max(n_tasks,1):.2f} s",
+        "",
+        "--- Parallelism (this run) ---",
+        f"Workers (jobs)    : {args.jobs}",
+        f"Threads per job   : {args.threads_per_job}",
+        f"Total CPU threads : {args.jobs * args.threads_per_job}  (jobs x threads_per_job)",
+        "",
+        "Rule of thumb for picking jobs x threads_per_job:",
+        "  1. Target jobs x threads_per_job = physical cores; never exceed logical cores.",
+        "  2. Raise JOBS first until RAM is the limit (each 128^3 direct solve ~13 GB),",
+        "     then spend any leftover cores on THREADS_PER_JOB.",
+        "  3. JOBS scales throughput near-linearly; extra THREADS_PER_JOB has",
+        "     diminishing returns -- so prefer more jobs over more threads.",
+        "  Cap: direct @ 128^3 on 32 GB -> JOBS <= 2 (more OOMs PARDISO).",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--csv_dir",
-                    default=r"D:\Summer2026_ResPlan\ResPlan\fields_csv\3D_field\0-1",
-                    help="Directory with plan_*.csv files.")
-    ap.add_argument("--out_dir", default="./data", help="Output root (creates train/ and val/).")
+                    default=INPUT_FOLDER,
+                    help="Directory with plan_*.csv files. [default: USER CONFIG INPUT_FOLDER]")
+    ap.add_argument("--out_dir", default=OUTPUT_FOLDER,
+                    help="Output root (creates train/ and val/). [default: USER CONFIG OUTPUT_FOLDER]")
     ap.add_argument("--n_samples", type=int, default=None,
                     help="Limit number of plans processed (default: all).")
-    ap.add_argument("--grid_size", type=int, default=128,
+    ap.add_argument("--grid_size", type=int, default=GRID_XY,
                     help="Horizontal voxel grid size (H=W=N). Plans are anchored at the "
-                         "origin and CROPPED to fit. 128 @ 0.1 m = 12.8 m in x/y.")
-    ap.add_argument("--grid_z", type=int, default=48,
+                         "origin and CROPPED to fit. 128 @ 0.1 m = 12.8 m in x/y. "
+                         "[default: USER CONFIG GRID_XY]")
+    ap.add_argument("--grid_z", type=int, default=GRID_Z,
                     help="Vertical voxel grid size (D). Apartments are ~36 tall; 48 @ 0.1 m "
-                         "= 4.8 m and is divisible by 2**model_depth (16). Trims dead air.")
+                         "= 4.8 m and is divisible by 2**model_depth (16). Trims dead air. "
+                         "[default: USER CONFIG GRID_Z]")
     ap.add_argument("--val_frac", type=float, default=0.2,
                     help="Fraction of plans held out for validation.")
     ap.add_argument("--voxel_size", type=float, default=0.1,
                     help="Physical voxel edge length in metres (CSV coords are metres; "
                          "spacing is 0.1 m = 10 cm). Fixed, not auto-detected.")
-    ap.add_argument("--load_factor", type=float, default=1.0,
+    ap.add_argument("--load_factor", type=float, default=LOAD_FACTOR,
                     help="Design safety factor on the gravity body force (fz). 3.0 = solve "
                          "under 3x self-weight; scales both the fz input channel and the "
-                         "displacement target (linear, so they stay consistent).")
+                         "displacement target (linear, so they stay consistent). "
+                         "[default: USER CONFIG LOAD_FACTOR]")
     ap.add_argument("--fem_tol", type=float, default=1e-6, help="CG tolerance.")
     ap.add_argument("--fem_maxiter", type=int, default=2000, help="CG max iterations.")
-    ap.add_argument("--precond", default="amg", choices=["jacobi", "amg", "none", "direct"],
+    ap.add_argument("--precond", default=PRECOND, choices=["jacobi", "amg", "none", "direct"],
                     help="FEM solve: 'direct' = active-DOF reduction + direct sparse factorize "
-                         "(fastest, exact); 'amg'/'jacobi' = iterative CG. amg needs pyamg.")
-    ap.add_argument("--jobs", type=int, default=1,
-                    help="Parallel worker processes (AMG solve ~7-15 GB RAM each; 2 fits 32 GB).")
-    ap.add_argument("--threads_per_job", type=int, default=5,
-                    help="BLAS/OMP threads per worker (jobs*threads <= logical cores).")
+                         "(fastest, exact); 'amg'/'jacobi' = iterative CG. amg needs pyamg. "
+                         "[default: USER CONFIG PRECOND]")
+    ap.add_argument("--jobs", type=int, default=JOBS,
+                    help="Parallel worker processes (each direct 128^3 solve ~13 GB; 2 fits "
+                         "32 GB). [default: USER CONFIG JOBS]")
+    ap.add_argument("--threads_per_job", type=int, default=THREADS_PER_JOB,
+                    help="BLAS/OMP threads per worker (jobs*threads <= physical cores). "
+                         "[default: USER CONFIG THREADS_PER_JOB]")
     ap.add_argument("--overwrite", action="store_true",
                     help="Regenerate even if the output .h5 exists (default: skip existing, "
                          "so an interrupted run can be resumed).")
-    ap.add_argument("--material", default="steel", choices=list(MATERIALS),
-                    help="Material preset (steel | wood). Wood = isotropic structural softwood.")
+    ap.add_argument("--material", default=MATERIAL, choices=list(MATERIALS),
+                    help="Material preset (steel | wood). Wood = isotropic structural softwood. "
+                         "[default: USER CONFIG MATERIAL]")
     ap.add_argument("--E0", type=float, default=None, help="Override Young's modulus (Pa).")
     ap.add_argument("--rho_mat", type=float, default=None, help="Override material density (kg/m^3).")
     ap.add_argument("--nu", type=float, default=None, help="Override Poisson's ratio.")
     ap.add_argument("--seed", type=int, default=0, help="Shuffle seed for train/val split.")
+    ap.add_argument("--no_stats", action="store_true",
+                    help="Skip computing normalization_stats.npz at the end "
+                         "(otherwise it is written into out_dir, ready for train.py).")
     args = ap.parse_args()
+
+    # --- Check the USER CONFIG values before doing any slow work ------------
+    # Guard 1: material name must be a known preset. (argparse does not check
+    # the default against the choices, so a typo here would otherwise crash
+    # later with a confusing error.) Stop now with a clear message.
+    if args.material not in MATERIALS:
+        raise SystemExit(
+            f"MATERIAL = {args.material!r} is not a known material. "
+            f"Use one of: {', '.join(MATERIALS)}.")
+    # Guard 2: grid numbers must be positive (zero/negative is always wrong).
+    if args.grid_size <= 0 or args.grid_z <= 0:
+        raise SystemExit(
+            f"GRID_XY and GRID_Z must be positive numbers "
+            f"(got GRID_XY={args.grid_size}, GRID_Z={args.grid_z}).")
+    # Heads-up (not an error): the later training step prefers grid numbers
+    # that divide evenly by 16 (e.g. 16, 32, 48, 64, 128). Warn but continue.
+    for cfg_name, val in (("GRID_XY", args.grid_size), ("GRID_Z", args.grid_z)):
+        if val % 16 != 0:
+            print(f"NOTE: {cfg_name}={val} is not divisible by 16. This script "
+                  f"still runs fine, but the training step may need a multiple "
+                  f"of 16 (e.g. 16, 32, 48, 64, 128).", flush=True)
 
     # Resolve material: preset, with optional per-property overrides.
     material = dict(MATERIALS[args.material])
@@ -300,29 +449,18 @@ def main() -> None:
           f"no wind | precond={args.precond} jobs={args.jobs}x{args.threads_per_job}t", flush=True)
 
     # --- FEA setup card (constant across plans; for nTopology replication) ----
-    nz, ny, nx = grid_dhw
-    n_nodes = (nz + 1) * (ny + 1) * (nx + 1)
-    print(
-        "\n=== FEA setup (replicate in nTop) ===\n"
-        f"  Element type      : Q1/H8 trilinear hex, 2x2x2 Gauss, 3 DOF/node\n"
-        f"  Voxel grid (DxHxW): {nz} x {ny} x {nx}  ({nz*ny*nx} elements max)\n"
-        f"  Voxel size        : {args.voxel_size} m  (box {box[0]:.1f} x {box[1]:.1f} x {box[2]:.1f} m, Z-up)\n"
-        f"  Nodes / total DOF : {n_nodes} / {3*n_nodes}  (solid-only DOF printed per-plan below)\n"
-        f"  Young's modulus E : {material['E0']:.3e} Pa   (void uses Emin=1e-9*E, SIMP p=3)\n"
-        f"  Poisson ratio nu  : {material['nu']}\n"
-        f"  Material density  : {material['rho_mat']} kg/m^3\n"
-        f"  Gravity           : {GRAVITY} m/s^2  x load_factor {args.load_factor}  ->  body force fz "
-        f"= -{args.load_factor}*rho*g = {-args.load_factor*material['rho_mat']*GRAVITY:.1f} N/m^3\n"
-        f"  Boundary condition: z=0 plane fully clamped (Dirichlet u=0); free everywhere else\n"
-        f"  Solver            : active-DOF reduction + direct sparse factorize (pardiso/superlu)\n"
-        "=====================================\n", flush=True)
+    print("\n=== FEA setup (replicate in nTop) ===\n"
+          + format_fea_setup(args, material, grid_dhw, box)
+          + "=====================================\n", flush=True)
 
-    n_failed = [0]   # list so the nested _report can mutate it
+    n_failed = [0]    # list so the nested _report can mutate it
+    results = []      # per-plan result dicts, for the run-description summary
 
     def _report(k: int, r: dict) -> None:
         conv = "OK" if r["converged"] else "NOT-CONV (skipped, not written)"
         if not r["written"]:
             n_failed[0] += 1
+        results.append(r)
         print(f"[{k}/{len(tasks)}] {r['plan']} -> {r['split']}/{r['out']} "
               f"grid={r['shape']} solid_elem={r['n_solid']} "
               f"DOF active/free={r['n_active']}/{r['n_free']} [{r['backend']}] "
@@ -346,9 +484,35 @@ def main() -> None:
                 _report(k, r)
 
     elapsed = time.perf_counter() - t_start
+    n_written = len(tasks) - n_failed[0]
     print(f"\nDone in {elapsed/60:.1f} min ({elapsed/max(len(tasks),1):.1f}s/sample avg). "
-          f"Wrote {len(tasks) - n_failed[0]}/{len(tasks)} samples to {args.out_dir} "
+          f"Wrote {n_written}/{len(tasks)} samples to {args.out_dir} "
           f"(skip-existing={n_skip}, not-converged/dropped={n_failed[0]}).", flush=True)
+
+    # Write a human-readable description of this run (FEA setup actually used +
+    # run accounting) alongside the samples.
+    desc_path = Path(args.out_dir) / "run_description.txt"
+    write_run_description(
+        desc_path, args, material, grid_dhw, box,
+        n_found=len(files), n_train=n_train, n_val=n_val_written,
+        n_tasks=len(tasks), n_skip=n_skip, n_written=n_written,
+        n_dropped=n_failed[0], elapsed=elapsed, results=results)
+    print(f"Wrote run description -> {desc_path}", flush=True)
+
+    # Compute normalization stats over the train split we just wrote, so the
+    # dataset is immediately ready for train.py (skip with --no_stats). We hand
+    # compute_stats() THIS run's out_dir, so it always reads the data just
+    # generated -- never the standalone DATA_DIR default in compute_stats.py.
+    # Wrapped so a stats failure can't undo a completed (multi-hour) run.
+    if not args.no_stats:
+        try:
+            from step1_preprocess.compute_stats import compute_stats  # noqa: E402
+            stats_path, _, n_stat = compute_stats(args.out_dir)
+            print(f"Wrote normalization stats -> {stats_path} "
+                  f"(over {n_stat} train samples)", flush=True)
+        except Exception as exc:
+            print(f"Stats: SKIPPED/FAILED ({exc}). Generation is fine; run "
+                  f"compute_stats.py to make normalization_stats.npz.", flush=True)
 
 
 if __name__ == "__main__":
