@@ -48,7 +48,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 # (When generate_from_csv.py calls compute_stats(), it passes its own output
 #  folder instead, so this default is ignored in that path.)
 # ===========================================================================
-DATA_DIR = r"D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\061611"
+DATA_DIR = r"D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\0617_within128m_3585"
 # ===========================================================================
 
 

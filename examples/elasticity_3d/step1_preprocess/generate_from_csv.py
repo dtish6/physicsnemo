@@ -88,8 +88,8 @@ MATERIALS = {
 #     python step1_preprocess/generate_from_csv.py
 # Any command-line flag still OVERRIDES the matching value here.
 # ===========================================================================
-INPUT_FOLDER  = r"D:\Summer2026_ResPlan\ResPlan\fields_csv\3D_field\within_12p8m_1000"  # plan_*.csv live here
-OUTPUT_FOLDER = r"D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\061611"        # writes OUTPUT_FOLDER/train/*.h5 and /val/*.h5
+INPUT_FOLDER  = r"D:\Summer2026_ResPlan\ResPlan\fields_csv\3D_field\within_12p8m_rest2585"  # plan_*.csv live here
+OUTPUT_FOLDER = r"D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\061711"        # writes OUTPUT_FOLDER/train/*.h5 and /val/*.h5
 MATERIAL      = "wood"          # which preset above: "steel" or "wood"
 LOAD_FACTOR   = 3.0              # safety factor on gravity fz (e.g. 3.0 = solve under 3x self-weight)
 GRID_XY       = 128              # horizontal grid H=W (e.g. 128 or 32). Plans cropped to fit.
@@ -97,6 +97,12 @@ GRID_Z        = 48               # vertical grid D (height)
 PRECOND       = "direct"         # FEA solver: "direct" = exact + fastest (PARDISO); "amg"/"jacobi" = iterative
 JOBS          = 2                # plans solved in parallel (separate processes)
 THREADS_PER_JOB = 4              # CPU threads each solve may use internally
+# Continue sample numbering from a previous run so datasets can be merged without
+# filename collisions. Set to the COUNT of that run's split (e.g. 061611 has
+# 800 train + 200 val, so start this run's train at 800 and val at 200). Use 0/0
+# for a standalone dataset.
+START_TRAIN   = 800              # first train sample index (sample_{START_TRAIN:05d}.h5 ...)
+START_VAL     = 200              # first val sample index
 # SAFE grid numbers (divisible by 16, so the training step is happy): 16, 32, 48, 64, 96, 128
 # JOBS x THREADS_PER_JOB ~= physical cores. Raise JOBS first until RAM is full
 # (each 128^3 direct solve ~13 GB), then give the rest to THREADS_PER_JOB.
@@ -372,6 +378,13 @@ def main() -> None:
     ap.add_argument("--rho_mat", type=float, default=None, help="Override material density (kg/m^3).")
     ap.add_argument("--nu", type=float, default=None, help="Override Poisson's ratio.")
     ap.add_argument("--seed", type=int, default=0, help="Shuffle seed for train/val split.")
+    ap.add_argument("--start_train", type=int, default=START_TRAIN,
+                    help="First train sample index, to continue numbering from a previous "
+                         "run for merging (e.g. 800 if the prior run wrote 800 train samples). "
+                         "[default: USER CONFIG START_TRAIN]")
+    ap.add_argument("--start_val", type=int, default=START_VAL,
+                    help="First val sample index, to continue numbering from a previous run. "
+                         "[default: USER CONFIG START_VAL]")
     ap.add_argument("--no_stats", action="store_true",
                     help="Skip computing normalization_stats.npz at the end "
                          "(otherwise it is written into out_dir, ready for train.py).")
@@ -430,9 +443,9 @@ def main() -> None:
     n_train = n_val_written = n_skip = 0
     for i, fp in enumerate(files):
         if i in val_idx:
-            out = val_dir / f"sample_{n_val_written:05d}.h5"; n_val_written += 1
+            out = val_dir / f"sample_{args.start_val + n_val_written:05d}.h5"; n_val_written += 1
         else:
-            out = train_dir / f"sample_{n_train:05d}.h5"; n_train += 1
+            out = train_dir / f"sample_{args.start_train + n_train:05d}.h5"; n_train += 1
         if (not args.overwrite) and out.exists():
             n_skip += 1   # resume: skip already-generated samples
             continue
@@ -513,6 +526,21 @@ def main() -> None:
         except Exception as exc:
             print(f"Stats: SKIPPED/FAILED ({exc}). Generation is fine; run "
                   f"compute_stats.py to make normalization_stats.npz.", flush=True)
+
+    # Write the sample -> source plan_*.csv mapping (provenance). Uses THIS run's
+    # in-memory split (files + val_idx), so it reflects the run exactly; flags any
+    # dropped (non-converged) sample whose .h5 is missing. Wrapped so a mapping
+    # failure can't undo a completed run; re-runnable via make_sample_plan_map.py.
+    try:
+        from step1_preprocess.make_sample_plan_map import write_sample_plan_map  # noqa: E402
+        m = write_sample_plan_map(args.out_dir, files, val_idx,
+                                  args.start_train, args.start_val)
+        print(f"Wrote sample->plan map -> {m['path']} "
+              f"({m['n_on_disk']}/{m['n_assigned']} on disk, "
+              f"{m['n_missing']} dropped)", flush=True)
+    except Exception as exc:
+        print(f"Sample-plan map: SKIPPED/FAILED ({exc}). Generation is fine; run "
+              f"make_sample_plan_map.py to rebuild it.", flush=True)
 
 
 if __name__ == "__main__":

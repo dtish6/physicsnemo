@@ -1,0 +1,48 @@
+FEA dataset generation -- run description
+=======================================================
+Generated         : 2026-06-17T16:06:18
+Script            : generate_from_csv.py
+
+--- Paths ---
+Input  (csv_dir)  : D:\Summer2026_ResPlan\ResPlan\fields_csv\3D_field\within_12p8m_rest2585
+Output (out_dir)  : D:\Nemo\physicsnemo\examples\elasticity_3d\step1_preprocess\hdf5_data\061711
+
+--- FEA setup (values actually used) ---
+  Element type      : Q1/H8 trilinear hex, 2x2x2 Gauss, 3 DOF/node
+  Voxel grid (DxHxW): 48 x 128 x 128  (786432 elements max)
+  Voxel size        : 0.1 m  (box 4.8 x 12.8 x 12.8 m, Z-up)
+  Nodes / total DOF : 815409 / 2446227
+  Material          : wood
+  Young's modulus E : 1.100e+10 Pa   (void uses Emin=1e-9*E, SIMP p=3)
+  Poisson ratio nu  : 0.35
+  Material density  : 500.0 kg/m^3
+  Gravity           : 9.81 m/s^2  x load_factor 3.0
+  Body force fz     : -14715.0 * rho  N/m^3  (gravity in -z, no wind)
+  Density threshold : 0.05  (rho above this counts as solid)
+  Boundary condition: z=0 plane fully clamped (Dirichlet u=0); free elsewhere
+  Solver            : active-DOF reduction + direct sparse factorize (pardiso/superlu)
+  Backend (actual)  : pardiso
+
+--- Run results ---
+Plans found       : 2585
+Train / Val split : 2068 / 517  (val_frac=0.2, seed=0)
+Skipped (existing): 0
+Plans attempted   : 2585
+Samples written   : 2585
+Dropped (non-conv): 0
+|u|max (written)  : min=8.50e-06  max=2.03e-02  mean=2.23e-04 m
+Total time        : 321.55 min (19293.1 s)
+Avg per attempted : 7.46 s
+
+--- Parallelism (this run) ---
+Workers (jobs)    : 2
+Threads per job   : 4
+Total CPU threads : 8  (jobs x threads_per_job)
+
+Rule of thumb for picking jobs x threads_per_job:
+  1. Target jobs x threads_per_job = physical cores; never exceed logical cores.
+  2. Raise JOBS first until RAM is the limit (each 128^3 direct solve ~13 GB),
+     then spend any leftover cores on THREADS_PER_JOB.
+  3. JOBS scales throughput near-linearly; extra THREADS_PER_JOB has
+     diminishing returns -- so prefer more jobs over more threads.
+  Cap: direct @ 128^3 on 32 GB -> JOBS <= 2 (more OOMs PARDISO).
